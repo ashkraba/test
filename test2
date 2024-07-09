@@ -1,0 +1,136 @@
+def sites = [ 
+    dev: [
+        front: '10.0.51.142',
+        site: 'dev-asbis.webplatform.webdev.it4profit.biz',
+        opt: ' '
+    ],
+    stage: [
+        front: '10.0.51.152',
+        site: 'stage-asbis.webplatform.webdev.it4profit.biz',
+        opt: ' '
+    ],
+    master: [
+        front: '10.0.51.172',
+        com: 'www.asbis.com',
+        pl: 'www.asbis.pl',
+        gr: 'www.asbis.gr',
+        ro: 'www.asbis.ro',
+        kz: 'www.asbis.kz',
+        ua: 'www.asbis.ua',
+        bg: 'www.asbis.bg',
+        rs: 'www.asbis.rs',
+        ba: 'www.asbis.ba',
+        cz: 'www.asbis.cz',
+        me: 'www.asbis.me',
+        si: 'www.asbis.si',
+        za: 'www.asbisafrica.co.za',
+        hr: 'www.asbis.hr',
+        opt: "--exclude='node_modules'"
+    ] 
+]
+
+def git_checkout() {
+    checkout scmGit(branches: [[name: "origin/${gitlabTargetBranch}"]], 
+                    userRemoteConfigs: [[credentialsId: 'git_tech2', 
+                                        url: 'https://gitweb.it4profit.com/webplatform/asbis-frontend']]) 
+}
+
+def geo_build() {
+    if ( gitlabTargetBranch=='master') { 
+        sh "ln -s /work/modules/node_modules node_modules && cp .env.${site} .env && yarn run build"
+    } else {
+        sh "cp .env.example-${gitlabTargetBranch} .env && yarn run build"        
+    }
+}
+
+def geo_deploy() {
+    sh "rsync -qzr --delete-after -e 'ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no' --rsync-path='sudo -u nginx rsync' ${opt} ./ ${tech_user}@${f_host}:${common_dir}${site}"
+}
+
+def pm_restart() {
+    if (gitlabTargetBranch=='master') {
+        sh "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no ${tech_user}@${f_host} 'sudo PM2_HOME=/storage/data/pm2 pm2 restart ${site}'"
+    } else {
+        sh "ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no ${tech_user}@${f_host} 'sudo PM2_HOME=/storage/data/pm2 pm2 restart ${site.split("\\.")[0]}'"
+    }
+}
+
+pipeline {
+    agent none
+    environment {
+        common_dir = '/storage/data/nginx/sites/'
+        tech_user = 'jenkins'
+        YARN_CACHE_FOLDER = '/work/caches'
+        f_host = "${sites[gitlabTargetBranch].front}"
+        site = "${sites[gitlabTargetBranch].site}"
+        opt = "${sites[gitlabTargetBranch].opt}"
+    }
+    stages {
+        stage('Common') {
+            agent { docker {
+                    image 'docker.webplatform.int/node/node_lint:v1'
+                    args '-e NODE_OPTIONS=--max_old_space_size=4096 -v /apps/caches:/work/caches -v /apps/node_modules/asbis:/work/modules/node_modules'
+                    registryUrl 'https://docker.webplatform.int'
+                    registryCredentialsId 'nexus_tech'
+                    label 'asbis' }
+            }
+            environment { SSH_KEY = credentials('jenkins2') }   
+            stages {
+                stage('Checkout') { steps { git_checkout() } }
+                stage('Prepare dependencies') { steps { sh 'ln -s /work/modules/node_modules node_modules && yarn install' } }
+                stage('Sync dependencies for PROD') {
+                    when { expression { gitlabTargetBranch == 'master' } }
+                    steps { sh "rsync -Lqzr --delete-after -e 'ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no' --rsync-path='sudo -u nginx rsync' node_modules ${tech_user}@${f_host}:${common_dir}"}  
+                }
+                stage('Build NON-PROD frontend') {
+                    when { expression { gitlabTargetBranch != 'master' } }
+                    steps { echo "####Build front-end part of ${site}#####"
+                            geo_build() }
+                }
+                stage('Deploy NON-PROD frontend') {
+                    when { expression { gitlabTargetBranch != 'master' } }
+                    steps { echo "####Deploy front-end part of ${site} to ${f_host}:${common_dir}${site}#####"
+                            geo_deploy() }
+                }
+                stage('Restart PM2 process') {
+                    when { expression { gitlabTargetBranch != 'master' } }
+                    steps { pm_restart() }
+                }
+            }
+            post { always { cleanWs(deleteDirs: true) } }
+        }        
+        stage('Build and Deploy PROD') {
+            when { 
+                expression { params.d_sites == 'all' }
+                expression { gitlabTargetBranch == 'master'}
+            }
+            matrix {
+                when { expression { params.d_sites.contains(sites[gitlabTargetBranch][geo]) } }
+                agent { docker {
+                    image 'docker.webplatform.int/node/node_lint:v1'
+                    args '-e NODE_OPTIONS=--max_old_space_size=4096 -v /apps/caches:/work/caches -v /apps/node_modules/asbis:/work/modules/node_modules'
+                    registryUrl 'https://docker.webplatform.int'
+                    registryCredentialsId 'nexus_tech'
+                    label 'asbis' } 
+                }
+                environment { 
+                    SSH_KEY = credentials('jenkins2')
+                    site = "${sites[gitlabTargetBranch][geo]}"
+                }
+                axes {
+                    axis { 
+                        name 'geo' 
+                        values 'com', 'pl', 'gr', 'ro', 'kz', 'ua', 'bg', 'rs', 'ba', 'cz', 'me', 'si', 'za', 'hr'
+                    }
+                }
+                stages {
+                    stage('Checkout') { steps { git_checkout() } }
+                    stage('Build GEO') { steps { geo_build() } }
+                    stage('Deploy GEO') { steps { geo_deploy() } } 
+                    stage('Restart PM2 process') { steps { pm_restart() } }
+                }
+                post { always { cleanWs(deleteDirs: true) } }
+            }
+        }
+    } 
+} 
