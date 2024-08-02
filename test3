@@ -1,0 +1,96 @@
+@Library('wpl-web') _
+import com.wpl.GlobalVarsPlaza
+
+def repo='https://gitweb.it4profit.com/webplatform/acean'
+
+pipeline {
+    agent none
+    environment {
+        tech_user = 'jenkins'
+        common_dir = '/storage/data/nginx/sites'
+        f_host = "${GlobalVarsPlaza.plazaFront[gitlabTargetBranch]}"
+    }
+    stages {
+        stage('Common') {
+            agent { 
+                docker { 
+                    image 'docker.webplatform.int/node/node_lint:v1'
+                    args '-e NODE_OPTIONS=--max_old_space_size=2048 -v /apps/caches:/work/caches -v /apps/node_modules/plaza:/work/modules/node_modules'
+                    registryUrl 'https://docker.webplatform.int'
+                    registryCredentialsId 'nexus_tech'
+                    label 'plaza' } 
+            }
+            environment {
+                SSH_KEY = credentials('jenkins2')
+                YARN_CACHE_FOLDER = '/work/caches'
+            }
+            stages {
+                stage('Checkout') { steps { script { common.cloneRepo(gitlabTargetBranch, repo) } } }
+                stage('Get info') { steps { script { skipList=common.getSkip(['SKIP-PLAZA', 'SKIP-CATALOG', 'SKIP-ISPACE']) } } }
+                stage('Prepare dependencies') { steps { script { front.prepDeps() } } }
+                stage('Sync dependencies') { steps { script { front.syncDeps(f_host, common_dir) } } }
+            }
+            post { cleanup { cleanWs(deleteDirs: true) } }
+        }
+        stage('Ispace') {
+            when { not { expression { skipList.contains('SKIP-ISPACE') } } }
+            matrix {
+                options { catchError(message: "The next site has failed:, please check logs", catchInterruptions: false, stageResult: 'UNSTABLE', buildResult: 'UNSTABLE') }
+                agent { docker {
+                    image 'docker.webplatform.int/node/node_lint:v1'
+                    args '-e NODE_OPTIONS=--max_old_space_size=2048 -v /apps/caches:/work/caches -v /apps/node_modules/plaza:/work/modules/node_modules'
+                    registryUrl 'https://docker.webplatform.int'
+                    registryCredentialsId 'nexus_tech'
+                    label 'plaza'} 
+                }
+                environment { 
+                    SSH_KEY = credentials('jenkins2')
+                    site = "${GlobalVarsPlaza.ispaceSites[gitlabTargetBranch][geo]}"
+                }
+                axes {
+                    axis { 
+                        name 'geo' 
+                        values 'uz', 'ua', 'kz', 'md', 'ge', 'by', 'am', 'az'
+                    }
+                }
+                stages {
+                    stage('Checkout') { steps { script { common.cloneRepo(gitlabTargetBranch, repo) } } }
+                    stage('Build GEO') { steps { script { front.buildGeo(site) } } }
+                    stage('Deploy GEO') { steps { script { front.deployGeo(f_host, common_dir+'/'+site) } } } 
+                    stage('Restart PM2 process') { steps { script { front.pmRestart(gitlabTargetBranch, f_host, site) } } } 
+                }
+                post { always { cleanWs(deleteDirs: true) } }
+            }
+        }
+        stage('Plaza') {
+            when { not { expression { skipList.contains('SKIP-PLAZA') } } }
+            matrix {
+                options { catchError(message: "The next site has failed:, please check logs", catchInterruptions: false, stageResult: 'UNSTABLE', buildResult: 'UNSTABLE') }
+                agent { docker {
+                    image 'docker.webplatform.int/node/node_lint:v1'
+                    args '-e NODE_OPTIONS=--max_old_space_size=2048 -v /apps/caches:/work/caches -v /apps/node_modules/plaza:/work/modules/node_modules'
+                    registryUrl 'https://docker.webplatform.int'
+                    registryCredentialsId 'nexus_tech'
+                    label 'plaza'} 
+                }
+                environment { 
+                    SSH_KEY = credentials('jenkins2')
+                    site = "${GlobalVarsPlaza.plazaSites[gitlabTargetBranch][geo]}"
+                }
+                axes {
+                    axis { 
+                        name 'geo' 
+                        values 'kz', 'sa', 'com'
+                    }
+                }
+                stages {
+                    stage('Checkout') { steps { script { common.cloneRepo(gitlabTargetBranch, repo) } } }
+                    stage('Build GEO') { steps { script { front.buildGeo(site) } } }
+                    stage('Deploy GEO') { steps { script { front.deployGeo(f_host, common_dir+'/'+site) } } } 
+                    stage('Restart PM2 process') { steps { script { front.pmRestart(gitlabTargetBranch, f_host, site) } } } 
+                }
+                post { always { cleanWs(deleteDirs: true) } }
+            }
+        }
+    }     
+} 
